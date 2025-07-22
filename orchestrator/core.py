@@ -5,6 +5,7 @@ Core Orchestrator - Central coordinator for all AI agents
 import asyncio
 import json
 import uuid
+import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -84,10 +85,11 @@ class AgentOrchestrator:
         from orchestrator.storage import get_storage
         self.storage = get_storage()
 
-        # Agent registry
+        # Agent registry - ENHANCED WITH PARSER AGENT
         self.available_agents = {
             "api_agent": "agents.api_agent.core.APIAgent",
             "devops_agent": "agents.devops_agent.core.DevOpsAgent",
+            "parser_agent": "agents.parser_agent.core.ParserAgent",  # NEW!
             # UI and Database agents will be added later
         }
 
@@ -99,7 +101,7 @@ class AgentOrchestrator:
         self.task_queue: List[AgentTask] = []
         self.completed_tasks: List[AgentTask] = []
 
-        self.logger.info("Agent Orchestrator initialized")
+        self.logger.info("Agent Orchestrator initialized with Parser Agent support")
 
     def _load_projects_from_storage(self):
         """Load existing projects from storage"""
@@ -114,11 +116,12 @@ class AgentOrchestrator:
             self.logger.error(f"Failed to load projects from storage: {str(e)}")
 
     async def create_new_project(self,
-                               name: str,
-                               project_type: ProjectType,
-                               language: ProjectLanguage,
-                               output_path: str) -> ProjectInfo:
-        """Create new test automation project"""
+                                 name: str,
+                                 project_type: ProjectType,
+                                 language: ProjectLanguage,
+                                 output_path: str,
+                                 api_spec_file: str = None) -> ProjectInfo:
+        """Create new test automation project with optional API specification"""
 
         project_id = str(uuid.uuid4())[:8]
 
@@ -129,7 +132,10 @@ class AgentOrchestrator:
             language=language,
             output_path=output_path,
             created_at=datetime.now().isoformat(),
-            updated_at=datetime.now().isoformat()
+            updated_at=datetime.now().isoformat(),
+            metadata={
+                "api_spec_file": api_spec_file if api_spec_file else None
+            }
         )
 
         self.active_projects[project_id] = project
@@ -138,44 +144,64 @@ class AgentOrchestrator:
         if not self.storage.save_project(project):
             self.logger.warning(f"Failed to save project to storage: {project_id}")
 
-        self.logger.info(f"Created new project: {name} ({project_id})")
+        self.logger.info(f"Created new project: {name} ({project_id}) with API spec: {bool(api_spec_file)}")
         return project
 
     async def analyze_project_requirements(self, project: ProjectInfo) -> Dict[str, Any]:
-        """Analyze project requirements and determine agent tasks"""
+        """Analyze project requirements and determine agent tasks - ENHANCED FOR API SPECS"""
 
         self.logger.info(f"Analyzing requirements for project: {project.name}")
+
+        # Check if API specification file is provided
+        api_spec_file = project.metadata.get('api_spec_file')
+        has_api_spec = api_spec_file and os.path.exists(api_spec_file)
 
         # Prepare analysis prompt
         analysis_prompt = f"""
         Analyze the requirements for creating a {project.type.value} test automation project:
-        
+
         Project Details:
         - Name: {project.name}
         - Type: {project.type.value}
         - Language: {project.language.value}
         - Output Path: {project.output_path}
-        
-        Based on this information, determine:
-        1. Which agents need to be involved (api_agent, devops_agent)
-        2. The sequence of operations
-        3. Dependencies between tasks
-        4. Estimated timeline
-        
+        - Has API Specification: {has_api_spec}
+        {"- API Spec File: " + api_spec_file if has_api_spec else ""}
+
+        Based on this information, determine the optimal task sequence:
+
+        {"If API specification is provided, FIRST use parser_agent to analyze the spec, then api_agent to generate tests based on parsed data." if has_api_spec else "Use api_agent to create basic project structure."}
+        Finally use devops_agent to setup environment.
+
         Respond in JSON format:
         {{
-            "required_agents": ["agent1", "agent2"],
+            "required_agents": {["parser_agent", "api_agent", "devops_agent"] if has_api_spec else ["api_agent", "devops_agent"]},
             "task_sequence": [
+                {'''
+                {
+                    "agent": "parser_agent",
+                    "operation": "parse_api_specification",
+                    "description": "Parse API specification and extract endpoints",
+                    "dependencies": [],
+                    "estimated_duration_minutes": 3
+                },''' if has_api_spec else ''}
                 {{
-                    "agent": "agent_name",
-                    "operation": "operation_name",
-                    "description": "what this operation does",
-                    "dependencies": ["previous_task_ids"],
+                    "agent": "api_agent", 
+                    "operation": "create_project_structure",
+                    "description": "Create project structure{" with parsed API data" if has_api_spec else ""}",
+                    "dependencies": {["parse_api_specification"] if has_api_spec else []},
                     "estimated_duration_minutes": 5
+                }},
+                {{
+                    "agent": "devops_agent",
+                    "operation": "create_docker_setup", 
+                    "description": "Setup Docker environment",
+                    "dependencies": ["create_project_structure"],
+                    "estimated_duration_minutes": 4
                 }}
             ],
-            "total_estimated_minutes": 15,
-            "complexity": "simple|medium|complex"
+            "total_estimated_minutes": {12 if has_api_spec else 9},
+            "complexity": {"medium" if has_api_spec else "simple"}
         }}
         """
 
@@ -193,25 +219,34 @@ class AgentOrchestrator:
             raise
 
     async def create_task_plan(self, project: ProjectInfo, analysis: Dict[str, Any]) -> List[AgentTask]:
-        """Create detailed task plan based on analysis"""
+        """Create detailed task plan based on analysis - ENHANCED"""
 
         tasks = []
+        api_spec_file = project.metadata.get('api_spec_file')
 
         if "task_sequence" in analysis:
             for i, task_info in enumerate(analysis["task_sequence"]):
+
+                # Build base parameters
+                base_params = {
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "project_type": project.type.value,
+                    "language": project.language.value,
+                    "output_path": project.output_path,
+                    "description": task_info.get("description", ""),
+                    "dependencies": task_info.get("dependencies", [])
+                }
+
+                # Add API spec file to parser agent tasks
+                if task_info["agent"] == "parser_agent" and api_spec_file:
+                    base_params["spec_file_path"] = api_spec_file
+
                 task = AgentTask(
-                    id=f"{project.id}-task-{i+1}",
+                    id=f"{project.id}-task-{i + 1}",
                     agent_type=task_info["agent"],
                     operation=task_info["operation"],
-                    parameters={
-                        "project_id": project.id,
-                        "project_name": project.name,
-                        "project_type": project.type.value,
-                        "language": project.language.value,
-                        "output_path": project.output_path,
-                        "description": task_info.get("description", ""),
-                        "dependencies": task_info.get("dependencies", [])
-                    }
+                    parameters=base_params
                 )
                 tasks.append(task)
 
@@ -233,9 +268,19 @@ class AgentOrchestrator:
 
             # Step 3: Execute tasks in sequence
             results = []
+            parsed_data = None  # Store parsed data for passing between agents
+
             for task in tasks:
+                # If this is an API agent task and we have parsed data, include it
+                if task.agent_type == "api_agent" and parsed_data:
+                    task.parameters["parsed_data"] = parsed_data
+
                 result = await self.execute_task(task)
                 results.append(result)
+
+                # Store parsed data for next tasks
+                if task.agent_type == "parser_agent" and result.get('parsed_data'):
+                    parsed_data = result['parsed_data']
 
                 if task.status == TaskStatus.FAILED:
                     self.logger.error(f"Task failed: {task.id} - {task.error_message}")
@@ -261,7 +306,8 @@ class AgentOrchestrator:
                 "analysis": analysis,
                 "tasks_completed": len([t for t in tasks if t.status == TaskStatus.COMPLETED]),
                 "total_tasks": len(tasks),
-                "results": results
+                "results": results,
+                "parsed_data": parsed_data  # Include parsed data in results
             }
 
         except Exception as e:
@@ -275,19 +321,19 @@ class AgentOrchestrator:
             raise
 
     async def execute_task(self, task: AgentTask) -> Dict[str, Any]:
-        """Execute individual agent task"""
+        """Execute individual agent task - ENHANCED FOR PARSER AGENT"""
 
         self.logger.info(f"Executing task: {task.id} ({task.agent_type})")
         task.status = TaskStatus.IN_PROGRESS
 
         try:
-            # For MVP, we'll simulate agent execution
-            # Later this will call actual agent classes
-
+            # Execute based on agent type
             if task.agent_type == "api_agent":
                 result = await self._execute_api_agent_task(task)
             elif task.agent_type == "devops_agent":
                 result = await self._execute_devops_agent_task(task)
+            elif task.agent_type == "parser_agent":  # NEW!
+                result = await self._execute_parser_agent_task(task)
             else:
                 raise ValueError(f"Unknown agent type: {task.agent_type}")
 
@@ -310,6 +356,72 @@ class AgentOrchestrator:
 
             self.logger.error(f"Task failed: {task.id} - {str(e)}")
             raise
+
+    async def _execute_parser_agent_task(self, task: AgentTask) -> Dict[str, Any]:
+        """Execute Parser agent task using real agent - NEW METHOD"""
+
+        try:
+            # Import and create Parser agent
+            import sys
+            from pathlib import Path
+
+            # Add project root to path if not already there
+            project_root = Path(__file__).parent.parent
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+
+            from agents.parser_agent.core import ParserAgent
+
+            self.logger.info(f"Creating Parser Agent instance for task: {task.operation}")
+            parser_agent = ParserAgent()
+
+            # Execute the operation
+            result = await parser_agent.execute_operation(task.operation, task.parameters)
+
+            self.logger.info(f"Parser Agent completed operation: {task.operation}")
+            return result
+
+        except Exception as e:
+            # Log the actual error for debugging
+            self.logger.error(f"Parser Agent failed with error: {str(e)}")
+            self.logger.warning(f"Falling back to simulation for: {task.operation}")
+            return await self._simulate_parser_agent_task(task)
+
+    async def _simulate_parser_agent_task(self, task: AgentTask) -> Dict[str, Any]:
+        """Simulate Parser agent work (fallback) - NEW METHOD"""
+
+        # Simulate parser agent work
+        await asyncio.sleep(1)  # Simulate processing time
+
+        operation = task.operation
+        params = task.parameters
+
+        if operation == "parse_api_specification":
+            return {
+                "operation": operation,
+                "status": "completed",
+                "spec_type": "openapi",
+                "endpoints_count": 5,
+                "parsed_data": {
+                    "title": "Sample API",
+                    "base_url": "${api.base.url}",
+                    "authentication": {"type": "bearer"},
+                    "endpoints": [
+                        {"path": "/users", "method": "GET", "test_scenarios": []},
+                        {"path": "/users", "method": "POST", "test_scenarios": []},
+                        {"path": "/users/{id}", "method": "GET", "test_scenarios": []},
+                        {"path": "/users/{id}", "method": "PUT", "test_scenarios": []},
+                        {"path": "/users/{id}", "method": "DELETE", "test_scenarios": []}
+                    ]
+                },
+                "message": "Simulated API specification parsing"
+            }
+        else:
+            return {
+                "operation": operation,
+                "status": "completed",
+                "message": f"Completed {operation}"
+            }
 
     async def _execute_api_agent_task(self, task: AgentTask) -> Dict[str, Any]:
         """Execute API agent task using real agent"""

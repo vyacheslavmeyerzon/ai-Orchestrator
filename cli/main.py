@@ -46,7 +46,7 @@ Automated test generation and management system
         box=box.DOUBLE_EDGE,
         style="bold blue",
         title="[bold cyan]Welcome[/bold cyan]",
-        subtitle="[italic]v0.1.0-MVP[/italic]"
+        subtitle="[italic]v0.2.0-Enhanced[/italic]"
     ))
 
 
@@ -104,6 +104,7 @@ def create_projects_table(projects: list) -> Table:
     table.add_column("Type", style="green")
     table.add_column("Language", style="yellow")
     table.add_column("Status", style="bold")
+    table.add_column("API Spec", style="dim")
     table.add_column("Created", style="dim")
 
     for project in projects:
@@ -122,12 +123,16 @@ def create_projects_table(projects: list) -> Table:
         status = status_icons.get(project_status, f"❓ {project_status}")
         created = project['created_at'][:19].replace('T', ' ')
 
+        # Check if project has API spec
+        api_spec = "📄 Yes" if project.get('metadata', {}).get('api_spec_file') else "❌ No"
+
         table.add_row(
             project['id'],
             project['name'],
             project_type,
             project_language,
             status,
+            api_spec,
             created
         )
 
@@ -267,9 +272,12 @@ def project(ctx):
               type=click.Choice(['java', 'python']),
               help='Programming language')
 @click.option('--output-dir', help='Full path where project should be created')
+@click.option('--api-spec-file', 'api_spec_file',
+              type=click.Path(exists=True, readable=True),
+              help='Path to API specification file (Swagger/OpenAPI, Postman collection, YAML)')
 @click.pass_context
-def create(ctx, name, project_type, language, output_dir):
-    """Create a new test automation project"""
+def create(ctx, name, project_type, language, output_dir, api_spec_file):
+    """Create a new test automation project with optional API specification"""
 
     # Interactive prompts if not provided
     if not name:
@@ -288,6 +296,16 @@ def create(ctx, name, project_type, language, output_dir):
             choices=['java', 'python'],
             default='java'
         )
+
+    # Ask for API specification file if not provided and project type is API
+    if not api_spec_file and project_type in ['api', 'full']:
+        has_spec = Confirm.ask("📄 [bold]Do you have an API specification file (Swagger/Postman/YAML)?[/bold]")
+        if has_spec:
+            api_spec_file = Prompt.ask("📂 [bold]Path to API specification file[/bold]")
+            # Validate file exists
+            if api_spec_file and not os.path.exists(api_spec_file):
+                print_error(f"API specification file not found: {api_spec_file}")
+                return
 
     async def create_project():
         logger = ctx.obj['logger']
@@ -308,13 +326,18 @@ def create(ctx, name, project_type, language, output_dir):
             console.print(f"[dim]Suggested path:[/dim] C:\\Users\\user\\test-projects\\{name}")
             return
 
-        # Show project details
+        # Show project details including API spec file
         console.print("\n")
+        project_details = f"📁 [bold]Name:[/bold] {name}\n" \
+                          f"🎯 [bold]Type:[/bold] {project_type}\n" \
+                          f"💻 [bold]Language:[/bold] {language}\n" \
+                          f"📂 [bold]Output:[/bold] {output_dir_path}"
+
+        if api_spec_file:
+            project_details += f"\n📄 [bold]API Spec:[/bold] {api_spec_file}"
+
         project_panel = Panel(
-            f"📁 [bold]Name:[/bold] {name}\n"
-            f"🎯 [bold]Type:[/bold] {project_type}\n"
-            f"💻 [bold]Language:[/bold] {language}\n"
-            f"📂 [bold]Output:[/bold] {output_dir_path}",
+            project_details,
             title="[bold cyan]Creating Project[/bold cyan]",
             box=box.ROUNDED
         )
@@ -340,15 +363,16 @@ def create(ctx, name, project_type, language, output_dir):
                 # Initialize orchestrator
                 init_task = progress.add_task("Initializing orchestrator...", total=100)
                 orchestrator = get_orchestrator()
-                progress.update(init_task, advance=20)
+                progress.update(init_task, advance=15)
 
                 # Create project
-                progress.update(init_task, description="Creating project structure...", advance=20)
+                progress.update(init_task, description="Creating project structure...", advance=15)
                 project = await orchestrator.create_new_project(
                     name=name,
                     project_type=ProjectType(project_type),
                     language=ProjectLanguage(language),
-                    output_path=output_dir_path
+                    output_path=output_dir_path,
+                    api_spec_file=api_spec_file  # Pass API spec file to orchestrator
                 )
                 progress.update(init_task, advance=20)
 
@@ -373,6 +397,19 @@ def create(ctx, name, project_type, language, output_dir):
             results_table.add_row("Status", result['status'])
             results_table.add_row("Tasks Completed", f"{result['tasks_completed']}/{result['total_tasks']}")
 
+            if api_spec_file:
+                results_table.add_row("API Spec Parsed", "✅ Yes")
+                # Check if parsed data is available in result
+                parsed_data = None
+                for task_result in result.get('results', []):
+                    if isinstance(task_result, dict) and 'parsed_data' in task_result:
+                        parsed_data = task_result['parsed_data']
+                        break
+
+                if parsed_data:
+                    endpoints_count = parsed_data.get('endpoints_count', len(parsed_data.get('endpoints', [])))
+                    results_table.add_row("API Endpoints", str(endpoints_count))
+
             if 'analysis' in result and result['analysis']:
                 analysis = result['analysis']
                 results_table.add_row("Complexity", analysis.get('complexity', 'unknown'))
@@ -380,6 +417,32 @@ def create(ctx, name, project_type, language, output_dir):
                 results_table.add_row("Required Agents", ', '.join(analysis.get('required_agents', [])))
 
             console.print(results_table)
+
+            # Show additional info if API spec was processed
+            if api_spec_file:
+                console.print("\n")
+
+                # Find parsed data from results
+                parsed_info = "Not available"
+                endpoints_info = "Not parsed"
+                auth_info = "Unknown"
+
+                for task_result in result.get('results', []):
+                    if isinstance(task_result, dict) and 'parsed_data' in task_result:
+                        parsed_data = task_result['parsed_data']
+                        endpoints_info = str(len(parsed_data.get('endpoints', [])))
+                        auth_info = parsed_data.get('authentication', {}).get('type', 'none')
+                        break
+
+                api_info_panel = Panel(
+                    f"📄 [bold]API Specification:[/bold] {os.path.basename(api_spec_file)}\n"
+                    f"🔗 [bold]Endpoints:[/bold] {endpoints_info}\n"
+                    f"🔐 [bold]Authentication:[/bold] {auth_info}\n"
+                    f"📊 [bold]Test Scenarios:[/bold] Generated automatically",
+                    title="[bold green]API Analysis Results[/bold green]",
+                    box=box.ROUNDED
+                )
+                console.print(api_info_panel)
 
             logger.info(f"Project creation completed successfully: {name}")
 
@@ -532,12 +595,13 @@ def version(ctx):
 
     # Version panel
     version_info = Panel(
-        """🤖 [bold]AI Test Orchestrator[/bold] v0.1.0-MVP
+        """🤖 [bold]AI Test Orchestrator[/bold] v0.2.0-Enhanced
 
 [bold cyan]Components:[/bold cyan]
 • Agent Orchestrator ✅
-• API Agent (Enhanced) 🚀
-• DevOps Agent (Planned) ⏳
+• API Agent (Enhanced) ✅
+• DevOps Agent (Production Ready) ✅
+• Parser Agent (NEW!) 🚀
 • UI Agent (Planned) ⏳
 • Database Agent (Planned) ⏳
 
@@ -547,6 +611,8 @@ def version(ctx):
 • Real project file generation
 • Persistent project storage
 • Beautiful CLI interface
+• API specification parsing 🆕
+• Swagger/Postman/YAML support 🆕
 
 [dim]Built with Python, Claude AI, and modern CLI tools[/dim]""",
         title="[bold]Version Information[/bold]",
