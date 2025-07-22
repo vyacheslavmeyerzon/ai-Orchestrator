@@ -442,11 +442,17 @@ class APIAgent:
             created_files = []
 
             if "config_files" in response:
-                config_dir = output_path / ("src/test/resources" if language == "java" else "config")
+                if language == "java":
+                    config_dir = output_path / "src/test/resources"
+                else:
+                    config_dir = output_path / "config"
+
                 config_dir.mkdir(parents=True, exist_ok=True)
 
                 for filename, content in response["config_files"].items():
-                    config_file = config_dir / filename
+                    # Remove any path from filename - just use the filename
+                    clean_filename = Path(filename).name
+                    config_file = config_dir / clean_filename
                     config_file.write_text(content, encoding='utf-8')
                     created_files.append(str(config_file))
 

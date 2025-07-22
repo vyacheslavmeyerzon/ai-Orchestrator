@@ -114,10 +114,10 @@ class AgentOrchestrator:
             self.logger.error(f"Failed to load projects from storage: {str(e)}")
 
     async def create_new_project(self,
-                                 name: str,
-                                 project_type: ProjectType,
-                                 language: ProjectLanguage,
-                                 output_path: str) -> ProjectInfo:
+                               name: str,
+                               project_type: ProjectType,
+                               language: ProjectLanguage,
+                               output_path: str) -> ProjectInfo:
         """Create new test automation project"""
 
         project_id = str(uuid.uuid4())[:8]
@@ -149,19 +149,19 @@ class AgentOrchestrator:
         # Prepare analysis prompt
         analysis_prompt = f"""
         Analyze the requirements for creating a {project.type.value} test automation project:
-
+        
         Project Details:
         - Name: {project.name}
         - Type: {project.type.value}
         - Language: {project.language.value}
         - Output Path: {project.output_path}
-
+        
         Based on this information, determine:
         1. Which agents need to be involved (api_agent, devops_agent)
         2. The sequence of operations
         3. Dependencies between tasks
         4. Estimated timeline
-
+        
         Respond in JSON format:
         {{
             "required_agents": ["agent1", "agent2"],
@@ -200,7 +200,7 @@ class AgentOrchestrator:
         if "task_sequence" in analysis:
             for i, task_info in enumerate(analysis["task_sequence"]):
                 task = AgentTask(
-                    id=f"{project.id}-task-{i + 1}",
+                    id=f"{project.id}-task-{i+1}",
                     agent_type=task_info["agent"],
                     operation=task_info["operation"],
                     parameters={
@@ -381,7 +381,37 @@ class AgentOrchestrator:
             }
 
     async def _execute_devops_agent_task(self, task: AgentTask) -> Dict[str, Any]:
-        """Execute DevOps agent task (simulated for MVP)"""
+        """Execute DevOps agent task using real agent"""
+
+        try:
+            # Import and create DevOps agent
+            import sys
+            from pathlib import Path
+
+            # Add project root to path if not already there
+            project_root = Path(__file__).parent.parent
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+
+            from agents.devops_agent.core import DevOpsAgent
+
+            self.logger.info(f"Creating DevOps Agent instance for task: {task.operation}")
+            devops_agent = DevOpsAgent()
+
+            # Execute the operation
+            result = await devops_agent.execute_operation(task.operation, task.parameters)
+
+            self.logger.info(f"DevOps Agent completed operation: {task.operation}")
+            return result
+
+        except Exception as e:
+            # Log the actual error for debugging
+            self.logger.error(f"DevOps Agent failed with error: {str(e)}")
+            self.logger.warning(f"Falling back to simulation for: {task.operation}")
+            return await self._simulate_devops_agent_task(task)
+
+    async def _simulate_devops_agent_task(self, task: AgentTask) -> Dict[str, Any]:
+        """Simulate DevOps agent work (fallback)"""
 
         # Simulate DevOps agent work
         await asyncio.sleep(1)
