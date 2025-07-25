@@ -120,10 +120,20 @@ class AgentOrchestrator:
                                  project_type: ProjectType,
                                  language: ProjectLanguage,
                                  output_path: str,
-                                 api_spec_file: str = None) -> ProjectInfo:
-        """Create new test automation project with optional API specification"""
+                                 api_spec_file: str = None,
+                                 project_config: Dict[str, Any] = None) -> ProjectInfo:
+        """Create new test automation project with optional API specification and configuration"""
 
         project_id = str(uuid.uuid4())[:8]
+
+        # Store all project configuration in metadata
+        metadata = {
+            "api_spec_file": api_spec_file if api_spec_file else None
+        }
+
+        # Add project configuration to metadata
+        if project_config:
+            metadata.update(project_config)
 
         project = ProjectInfo(
             id=project_id,
@@ -133,9 +143,7 @@ class AgentOrchestrator:
             output_path=output_path,
             created_at=datetime.now().isoformat(),
             updated_at=datetime.now().isoformat(),
-            metadata={
-                "api_spec_file": api_spec_file if api_spec_file else None
-            }
+            metadata=metadata
         )
 
         self.active_projects[project_id] = project
@@ -238,9 +246,11 @@ class AgentOrchestrator:
                     "dependencies": task_info.get("dependencies", [])
                 }
 
-                # Add API spec file to parser agent tasks
+                # Add API spec file and project config to parser agent tasks
                 if task_info["agent"] == "parser_agent" and api_spec_file:
                     base_params["spec_file_path"] = api_spec_file
+                    # Pass project configuration to parser agent
+                    base_params["project_config"] = project.metadata
 
                 task = AgentTask(
                     id=f"{project.id}-task-{i + 1}",

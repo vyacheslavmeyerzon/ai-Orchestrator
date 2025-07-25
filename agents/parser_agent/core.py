@@ -455,8 +455,103 @@ class ParserAgent:
         else:
             return 200
 
+    def _detect_hardcoded_secrets(self, content: Any, path: str = "") -> List[Dict[str, str]]:
+        """Detect and catalog hardcoded secrets in API specification"""
+        secrets = []
+
+        # Patterns for detecting secrets
+        secret_patterns = {
+            'api_key': r'[a-zA-Z0-9]{20,}',  # Long alphanumeric strings
+            'jwt_token': r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+',  # JWT tokens
+            'bearer_token': r'Bearer\s+[a-zA-Z0-9_-]+',  # Bearer tokens
+            'basic_auth': r'Basic\s+[a-zA-Z0-9+/=]+',  # Basic auth
+            'password': r'password.*["\'][^"\']{6,}["\']'  # Passwords in examples
+        }
+
+        def scan_object(obj, current_path=""):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    new_path = f"{current_path}.{key}" if current_path else key
+
+                    # Check for auth-related keys with suspicious values
+                    if any(auth_key in key.lower() for auth_key in ['auth', 'key', 'token', 'password', 'secret']):
+                        if isinstance(value, str) and len(value) > 10:
+                            # Check patterns
+                            for secret_type, pattern in secret_patterns.items():
+                                import re
+                                if re.search(pattern, value, re.IGNORECASE):
+                                    secrets.append({
+                                        'type': secret_type,
+                                        'key': key,
+                                        'original': value,
+                                        'path': new_path,
+                                        'replacement': self._generate_replacement_var(key, secret_type)
+                                    })
+                                    break
+
+                    scan_object(value, new_path)
+
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    scan_object(item, f"{current_path}[{i}]")
+
+        scan_object(content)
+        return secrets
+
+    def _generate_replacement_var(self, original_key: str, secret_type: str) -> str:
+        """Generate appropriate replacement variable name"""
+        key_upper = original_key.upper().replace('-', '_').replace(' ', '_')
+
+        if secret_type == 'api_key':
+            return f"${{{key_upper}_TO_CHANGE}}"
+        elif secret_type == 'jwt_token':
+            return "${JWT_TOKEN_TO_CHANGE}"
+        elif secret_type == 'bearer_token':
+            return "${BEARER_TOKEN_TO_CHANGE}"
+        elif secret_type == 'basic_auth':
+            return "${BASIC_AUTH_TO_CHANGE}"
+        elif secret_type == 'password':
+            return "${PASSWORD_TO_CHANGE}"
+        else:
+            return f"${{{key_upper}_SECRET_TO_CHANGE}}"
+
+    def _replace_hardcoded_secrets(self, content: Any, secrets: List[Dict[str, str]]) -> Any:
+        """Replace hardcoded secrets with parameterized variables"""
+        if not secrets:
+            return content
+
+        def replace_in_object(obj):
+            if isinstance(obj, dict):
+                new_obj = {}
+                for key, value in obj.items():
+                    # Check if this value should be replaced
+                    replacement = None
+                    for secret in secrets:
+                        if secret['original'] == value:
+                            replacement = secret['replacement']
+                            break
+
+                    new_obj[key] = replacement if replacement else replace_in_object(value)
+                return new_obj
+
+            elif isinstance(obj, list):
+                return [replace_in_object(item) for item in obj]
+            else:
+                return obj
+
+        return replace_in_object(content)
+
     async def _enhance_with_ai_analysis(self, parsed_data: Dict[str, Any], language: str) -> Dict[str, Any]:
-        """Enhance parsed data with AI analysis for better test generation"""
+        """Enhance parsed data with AI analysis and security scanning"""
+
+        # First, detect hardcoded secrets
+        security_warnings = self._detect_hardcoded_secrets(parsed_data)
+
+        # Replace hardcoded secrets with parameterized variables
+        if security_warnings:
+            self.logger.warning(f"Detected {len(security_warnings)} hardcoded secrets, replacing with parameters")
+            parsed_data = self._replace_hardcoded_secrets(parsed_data, security_warnings)
+            parsed_data['security_warnings'] = security_warnings
 
         enhancement_prompt = f"""
         Analyze the parsed API specification and enhance it for comprehensive test generation:
@@ -465,6 +560,7 @@ class ParserAgent:
         - Title: {parsed_data.get('title', 'Unknown')}
         - Endpoints: {len(parsed_data.get('endpoints', []))}
         - Language: {language}
+        - Security Issues: {len(security_warnings)} hardcoded secrets detected and replaced
 
         For each endpoint, suggest:
         1. Additional test scenarios (edge cases, boundary values)
@@ -474,6 +570,7 @@ class ParserAgent:
         5. Security test scenarios
 
         Focus on creating parameterized tests and avoiding hardcoded values.
+        Ensure all authentication and sensitive data uses environment variables.
 
         Respond with JSON:
         {{
@@ -483,8 +580,9 @@ class ParserAgent:
             ],
             "global_test_config": {{
                 "base_url_param": "api.base.url",
-                "auth_config": "auth configuration suggestions",
-                "environment_vars": ["VAR1", "VAR2"]
+                "auth_config": "parameterized authentication configuration",
+                "environment_vars": ["API_KEY", "BASE_URL", "AUTH_TOKEN"],
+                "security_recommendations": ["Use environment variables", "Rotate API keys regularly"]
             }},
             "enhanced_scenarios": {{
                 "endpoint_path": [
@@ -497,7 +595,7 @@ class ParserAgent:
         try:
             enhancement = await self.ai_connector.generate_structured_response(
                 enhancement_prompt,
-                "You are an expert in API testing and test automation best practices."
+                "You are an expert in API testing, security, and test automation best practices."
             )
 
             # Merge enhancements with parsed data
@@ -519,69 +617,112 @@ class ParserAgent:
             self.logger.warning(f"AI enhancement failed, using basic parsing: {str(e)}")
             return parsed_data
 
-    async def generate_test_configuration(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate environment-specific configuration files"""
+    async def generate_environment_configs(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate environment-specific configuration files with user-provided settings"""
 
         parsed_data = params.get('parsed_data', {})
         project_name = params['project_name']
         language = params['language']
         output_path = Path(params['output_path'])
+        project_config = params.get('project_config', {})
 
-        self.logger.info(f"Generating test configuration for: {project_name}")
+        self.logger.info(f"Generating environment configurations for: {project_name}")
+
+        # Extract configuration details
+        base_url = project_config.get('base_url') or parsed_data.get('base_url', '${api.base.url}')
+        auth_type = project_config.get('auth_type', 'none')
+        environments = project_config.get('environments', ['dev', 'staging', 'prod'])
+        environment_urls = project_config.get('environment_urls', {})
+        security_warnings = parsed_data.get('security_warnings', [])
 
         config_prompt = f"""
-        Generate environment-specific configuration files for API testing:
+        Generate environment-specific configuration files for API testing with user-provided settings:
 
         Project: {project_name}
         Language: {language}
-        Base URL: {parsed_data.get('base_url', 'unknown')}
-        Authentication: {parsed_data.get('authentication', {}).get('type', 'none')}
+        Base URL: {base_url}
+        Authentication: {auth_type}
+        Environments: {environments}
+        Security Issues: {len(security_warnings)} secrets replaced with parameters
 
-        Create configuration files for dev, staging, and prod environments with:
+        Create configuration files for each environment with:
         - Parameterized base URLs (no hardcoding)
         - Environment-specific settings
-        - Authentication configuration
+        - Authentication configuration for {auth_type}
         - Timeout and retry settings
         - Logging configuration
+        - Security variables from replaced secrets
+
+        Environment URLs:
+        {environment_urls}
+
+        Include all security variables that were replaced:
+        {[s['replacement'] for s in security_warnings]}
 
         Respond with JSON:
         {{
             "config_files": {{
                 "environment_name.properties": "file content here"
-            }}
+            }},
+            "env_template": ".env template content",
+            "security_setup_guide": "Instructions for setting up replaced secrets"
         }}
         """
 
         try:
             response = await self.ai_connector.generate_structured_response(
                 config_prompt,
-                "Create production-ready configuration files with proper parameterization."
+                "Create production-ready configuration files with proper parameterization and security."
             )
 
             created_files = []
 
+            if language == "java":
+                config_dir = output_path / "src/test/resources"
+            else:
+                config_dir = output_path / "config"
+
+            config_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create environment-specific config files
             if "config_files" in response:
-                if language == "java":
-                    config_dir = output_path / "src/test/resources"
-                else:
-                    config_dir = output_path / "config"
-
-                config_dir.mkdir(parents=True, exist_ok=True)
-
                 for filename, content in response["config_files"].items():
                     config_file = config_dir / filename
                     config_file.write_text(content, encoding='utf-8')
                     created_files.append(str(config_file))
 
+            # Create .env template
+            if "env_template" in response:
+                env_file = output_path / ".env.template"
+                env_file.write_text(response["env_template"], encoding='utf-8')
+                created_files.append(str(env_file))
+
+            # Create security setup guide
+            if "security_setup_guide" in response and security_warnings:
+                security_file = output_path / "SECURITY_SETUP.md"
+                security_content = response["security_setup_guide"]
+
+                # Add detected secrets info
+                security_content += "\n\n## Detected Hardcoded Secrets\n\n"
+                security_content += "The following hardcoded secrets were detected and replaced:\n\n"
+
+                for warning in security_warnings:
+                    security_content += f"- **{warning['type']}** in `{warning['path']}`: "
+                    security_content += f"`{warning['original'][:20]}...` → `{warning['replacement']}`\n"
+
+                security_file.write_text(security_content, encoding='utf-8')
+                created_files.append(str(security_file))
+
             return {
-                "operation": "generate_test_configuration",
+                "operation": "generate_environment_configs",
                 "status": "completed",
                 "created_files": created_files,
-                "message": f"Generated {len(created_files)} configuration files"
+                "security_warnings": security_warnings,
+                "message": f"Generated {len(created_files)} configuration files with security enhancements"
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to generate test configuration: {str(e)}")
+            self.logger.error(f"Failed to generate environment configurations: {str(e)}")
             raise
 
     async def generate_test_data(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -659,15 +800,16 @@ class ParserAgent:
 
         operation_mapping = {
             "parse_api_specification": self.parse_api_specification,
-            "generate_test_configuration": self.generate_test_configuration,
+            "generate_environment_configs": self.generate_environment_configs,
             "generate_test_data": self.generate_test_data,
 
             # Alternative operation names
             "parse_swagger": self.parse_api_specification,
             "parse_postman": self.parse_api_specification,
             "parse_yaml": self.parse_api_specification,
-            "create_test_config": self.generate_test_configuration,
-            "create_test_data": self.generate_test_data
+            "create_test_config": self.generate_environment_configs,
+            "create_test_data": self.generate_test_data,
+            "generate_test_configuration": self.generate_environment_configs
         }
 
         if operation in operation_mapping:

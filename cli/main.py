@@ -1,5 +1,6 @@
 """
 Beautiful CLI interface for AI Test Orchestrator with Rich formatting
+Enhanced with base URL and security parameter support
 """
 
 import click
@@ -46,7 +47,7 @@ Automated test generation and management system
         box=box.DOUBLE_EDGE,
         style="bold blue",
         title="[bold cyan]Welcome[/bold cyan]",
-        subtitle="[italic]v0.2.0-Enhanced[/italic]"
+        subtitle="[italic]v0.3.0-Security Enhanced[/italic]"
     ))
 
 
@@ -68,6 +69,34 @@ def print_info(message: str):
 def print_warning(message: str):
     """Print warning message"""
     console.print(f"⚠️  [bold yellow]{message}[/bold yellow]")
+
+
+def print_security_warning(warnings: list):
+    """Print security warnings in red"""
+    if not warnings:
+        return
+
+    console.print("\n")
+    console.print("🔴 [bold red]SECURITY WARNING: Hardcoded secrets detected and replaced![/bold red]")
+    console.print()
+
+    warning_text = "🔒 [bold red]Found hardcoded secrets:[/bold red]\n"
+    for warning in warnings:
+        warning_text += f"   • {warning['type']}: \"{warning['original'][:20]}...\" → {warning['replacement']}\n"
+
+    warning_text += "\n📝 [bold yellow]Action required:[/bold yellow]\n"
+    warning_text += "   • Set environment variables before running tests\n"
+    warning_text += "   • Update your .env file with real values\n"
+    warning_text += "   • Never commit real secrets to version control\n"
+    warning_text += "\n✅ [bold green]Project creation continues...[/bold green]"
+
+    security_panel = Panel(
+        warning_text,
+        title="[bold red]⚠️ SECURITY ALERT ⚠️[/bold red]",
+        box=box.HEAVY,
+        border_style="red"
+    )
+    console.print(security_panel)
 
 
 def create_status_table(config) -> Table:
@@ -275,9 +304,27 @@ def project(ctx):
 @click.option('--api-spec-file', 'api_spec_file',
               type=click.Path(exists=True, readable=True),
               help='Path to API specification file (Swagger/OpenAPI, Postman collection, YAML)')
+@click.option('--base-url', 'base_url',
+              help='Base URL for API (e.g., https://api.example.com)')
+@click.option('--auth-type', 'auth_type',
+              type=click.Choice(['none', 'api-key', 'bearer', 'basic', 'oauth2']),
+              help='Authentication type')
+@click.option('--api-key-header', 'api_key_header',
+              help='API key header name (e.g., X-API-Key, Authorization)')
+@click.option('--auth-server', 'auth_server',
+              help='OAuth2 authorization server URL')
+@click.option('--environments', 'environments',
+              help='Comma-separated list of environments (e.g., dev,staging,prod)')
+@click.option('--dev-url', 'dev_url',
+              help='Development environment base URL')
+@click.option('--staging-url', 'staging_url',
+              help='Staging environment base URL')
+@click.option('--prod-url', 'prod_url',
+              help='Production environment base URL')
 @click.pass_context
-def create(ctx, name, project_type, language, output_dir, api_spec_file):
-    """Create a new test automation project with optional API specification"""
+def create(ctx, name, project_type, language, output_dir, api_spec_file, base_url,
+           auth_type, api_key_header, auth_server, environments, dev_url, staging_url, prod_url):
+    """Create a new test automation project with comprehensive configuration"""
 
     # Interactive prompts if not provided
     if not name:
@@ -307,6 +354,42 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
                 print_error(f"API specification file not found: {api_spec_file}")
                 return
 
+    # Ask for base URL if not provided and we have API spec
+    if api_spec_file and not base_url:
+        console.print("\n[bold yellow]⚠️ Base URL Configuration[/bold yellow]")
+        console.print("The system will try to extract base URL from your API specification.")
+        console.print("You can override it or provide additional environment URLs.")
+
+        override_url = Confirm.ask("🌐 [bold]Override base URL from specification?[/bold]")
+        if override_url:
+            base_url = Prompt.ask("🔗 [bold]Base URL (e.g., https://api.example.com)[/bold]")
+
+    # Ask for authentication details if not provided
+    if api_spec_file and not auth_type:
+        console.print("\n[bold yellow]🔐 Authentication Configuration[/bold yellow]")
+        console.print("The system will try to detect authentication from your specification.")
+
+        override_auth = Confirm.ask("🔑 [bold]Override authentication settings?[/bold]")
+        if override_auth:
+            auth_type = Prompt.ask(
+                "🛡️ [bold]Authentication type[/bold]",
+                choices=['none', 'api-key', 'bearer', 'basic', 'oauth2'],
+                default='none'
+            )
+
+            if auth_type == 'api-key':
+                api_key_header = Prompt.ask("📋 [bold]API key header name[/bold]", default="X-API-Key")
+            elif auth_type == 'oauth2':
+                auth_server = Prompt.ask("🔐 [bold]OAuth2 server URL[/bold]")
+
+    # Ask for environment URLs if not provided
+    if api_spec_file and not any([dev_url, staging_url, prod_url]):
+        setup_envs = Confirm.ask("🌍 [bold]Setup multiple environments (dev/staging/prod)?[/bold]")
+        if setup_envs:
+            dev_url = Prompt.ask("🧪 [bold]Development URL[/bold]", default="")
+            staging_url = Prompt.ask("🎭 [bold]Staging URL[/bold]", default="")
+            prod_url = Prompt.ask("🚀 [bold]Production URL[/bold]", default="")
+
     async def create_project():
         logger = ctx.obj['logger']
         config = ctx.obj['config']
@@ -326,7 +409,21 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
             console.print(f"[dim]Suggested path:[/dim] C:\\Users\\user\\test-projects\\{name}")
             return
 
-        # Show project details including API spec file
+        # Prepare project configuration
+        project_config = {
+            "base_url": base_url,
+            "auth_type": auth_type,
+            "api_key_header": api_key_header,
+            "auth_server": auth_server,
+            "environments": environments.split(',') if environments else ['dev', 'staging', 'prod'],
+            "environment_urls": {
+                "dev": dev_url,
+                "staging": staging_url,
+                "prod": prod_url
+            }
+        }
+
+        # Show project details including all configuration
         console.print("\n")
         project_details = f"📁 [bold]Name:[/bold] {name}\n" \
                           f"🎯 [bold]Type:[/bold] {project_type}\n" \
@@ -335,6 +432,17 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
 
         if api_spec_file:
             project_details += f"\n📄 [bold]API Spec:[/bold] {api_spec_file}"
+
+        if base_url:
+            project_details += f"\n🌐 [bold]Base URL:[/bold] {base_url}"
+
+        if auth_type and auth_type != 'none':
+            project_details += f"\n🔐 [bold]Auth Type:[/bold] {auth_type}"
+            if api_key_header:
+                project_details += f"\n📋 [bold]API Key Header:[/bold] {api_key_header}"
+
+        if any([dev_url, staging_url, prod_url]):
+            project_details += f"\n🌍 [bold]Environments:[/bold] Configured"
 
         project_panel = Panel(
             project_details,
@@ -372,7 +480,8 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
                     project_type=ProjectType(project_type),
                     language=ProjectLanguage(language),
                     output_path=output_dir_path,
-                    api_spec_file=api_spec_file  # Pass API spec file to orchestrator
+                    api_spec_file=api_spec_file,
+                    project_config=project_config  # Pass configuration
                 )
                 progress.update(init_task, advance=20)
 
@@ -383,6 +492,15 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
 
                 # Complete
                 progress.update(init_task, description="Project creation completed!", completed=100)
+
+            # Show security warnings if any
+            security_warnings = []
+            for task_result in result.get('results', []):
+                if isinstance(task_result, dict) and 'security_warnings' in task_result:
+                    security_warnings.extend(task_result['security_warnings'])
+
+            if security_warnings:
+                print_security_warning(security_warnings)
 
             # Show results
             console.print("\n")
@@ -396,6 +514,9 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
             results_table.add_row("Project ID", project.id)
             results_table.add_row("Status", result['status'])
             results_table.add_row("Tasks Completed", f"{result['tasks_completed']}/{result['total_tasks']}")
+
+            if security_warnings:
+                results_table.add_row("Security Issues", f"🔴 {len(security_warnings)} secrets replaced")
 
             if api_spec_file:
                 results_table.add_row("API Spec Parsed", "✅ Yes")
@@ -438,7 +559,8 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file):
                     f"📄 [bold]API Specification:[/bold] {os.path.basename(api_spec_file)}\n"
                     f"🔗 [bold]Endpoints:[/bold] {endpoints_info}\n"
                     f"🔐 [bold]Authentication:[/bold] {auth_info}\n"
-                    f"📊 [bold]Test Scenarios:[/bold] Generated automatically",
+                    f"📊 [bold]Test Scenarios:[/bold] Generated automatically\n"
+                    f"🌍 [bold]Environments:[/bold] {len(project_config['environments'])} configured",
                     title="[bold green]API Analysis Results[/bold green]",
                     box=box.ROUNDED
                 )
@@ -595,13 +717,13 @@ def version(ctx):
 
     # Version panel
     version_info = Panel(
-        """🤖 [bold]AI Test Orchestrator[/bold] v0.2.0-Enhanced
+        """🤖 [bold]AI Test Orchestrator[/bold] v0.3.0-Security Enhanced
 
 [bold cyan]Components:[/bold cyan]
 • Agent Orchestrator ✅
 • API Agent (Enhanced) ✅
 • DevOps Agent (Production Ready) ✅
-• Parser Agent (NEW!) 🚀
+• Parser Agent (Security Enhanced) 🚀
 • UI Agent (Planned) ⏳
 • Database Agent (Planned) ⏳
 
@@ -611,8 +733,11 @@ def version(ctx):
 • Real project file generation
 • Persistent project storage
 • Beautiful CLI interface
-• API specification parsing 🆕
-• Swagger/Postman/YAML support 🆕
+• API specification parsing ✅
+• Swagger/Postman/YAML support ✅
+• Security hardcoded secrets detection 🆕
+• Multi-environment configuration 🆕
+• Authentication setup automation 🆕
 
 [dim]Built with Python, Claude AI, and modern CLI tools[/dim]""",
         title="[bold]Version Information[/bold]",
