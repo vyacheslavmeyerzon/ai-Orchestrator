@@ -42,7 +42,7 @@ class AnthropicConnector(AIConnector):
             raise ValueError("Anthropic API key is required")
 
         self.client = anthropic.Anthropic(api_key=self.api_key)
-        self.model = "claude-opus-4-20250514" ####### claude-opus-4-20250514 - 15$ ##claude-sonnet-4-20250514 - 3$
+        self.model = "claude-sonnet-4-20250514" ####### claude-opus-4-20250514 - 15$ ##claude-sonnet-4-20250514 - 3$
 
     async def generate_response(self, prompt: str, system_message: str = None) -> str:
         """Generate response using Claude"""

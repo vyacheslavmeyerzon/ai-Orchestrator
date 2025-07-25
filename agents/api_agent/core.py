@@ -1043,6 +1043,13 @@ class ServiceTestGenerator:
             else:
                 method_name = self._generate_method_name(method, path)
 
+            # Check for duplicate method names in the same service
+            existing_methods = [m.name for m in service_methods[service_name]]
+            if method_name in existing_methods:
+                # Make method name unique by adding path info
+                path_suffix = self._extract_path_suffix(path)
+                method_name = f"{method_name}{path_suffix}"
+
             # Parse parameters
             params = []
             param_names = set()  # Track parameter names to avoid duplicates
@@ -1056,7 +1063,18 @@ class ServiceTestGenerator:
 
             # Add body parameter for POST/PUT/PATCH only if not already present
             if method in ['POST', 'PUT', 'PATCH'] and request_body and 'body' not in param_names:
-                params.append(('body', 'Object'))
+                # Determine body type from request body schema
+                body_type = 'Object'
+                if 'content' in request_body:
+                    for content_type, content_spec in request_body['content'].items():
+                        if 'schema' in content_spec:
+                            schema = content_spec['schema']
+                            if schema.get('type') == 'array':
+                                body_type = 'List<Object>'
+                            elif schema.get('type') == 'object':
+                                body_type = 'Object'
+
+                params.append(('body', body_type))
 
             # Create method signature
             method_sig = MethodSignature(
@@ -1170,6 +1188,15 @@ public class {service_name} {{
         # Get methods for this service
         methods = self.registry.get_service_methods(service_name)
 
+        # Collect all required imports by analyzing all test methods
+        all_required_imports = set()
+
+        # Pre-analyze all methods to collect imports
+        for method in methods:
+            for valid in [True, False]:
+                _, imports = self._generate_test_data(method.params, valid)
+                all_required_imports.update(imports)
+
         # Generate imports
         imports = [
             f"import {self.base_package}.base.BaseTest;",
@@ -1180,21 +1207,52 @@ public class {service_name} {{
             "import static org.assertj.core.api.Assertions.assertThat;"
         ]
 
+        # Add collection imports in correct order
+        if "java.util.List" in all_required_imports:
+            imports.append("import java.util.List;")
+        if "java.util.ArrayList" in all_required_imports:
+            imports.append("import java.util.ArrayList;")
+        if "java.util.Map" in all_required_imports:
+            imports.append("import java.util.Map;")
+        if "java.util.HashMap" in all_required_imports:
+            imports.append("import java.util.HashMap;")
+
         # Generate test methods
         test_methods = []
         priority = 1
+        test_name_counter = {}  # Track duplicate test names
 
         for method in methods:
+            # Generate base test name
+            base_test_name = method.name.capitalize()
+
+            # Handle duplicate method names by adding suffix
+            if base_test_name in test_name_counter:
+                test_name_counter[base_test_name] += 1
+                # Add parameter info to make it unique
+                param_suffix = self._generate_param_suffix(method.params)
+                base_test_name = f"{base_test_name}{param_suffix}"
+            else:
+                test_name_counter[base_test_name] = 1
+
             # Generate positive test
-            test_name_positive = f"test{method.name.capitalize()}Success"
+            test_name_positive = f"test{base_test_name}Success"
             params = self._generate_test_params(method.params, valid=True)
             params_str = ', '.join(params)
+
+            # Generate positive test
+            test_name_positive = f"test{base_test_name}Success"
+            params = self._generate_test_params(method.params, valid=True)
+            params_str = ', '.join(params)
+
+            # Generate test data (get only the code, not the imports)
+            test_data_code, _ = self._generate_test_data(method.params, valid=True)
 
             test_positive = f"""
     @Test(priority = {priority})
     public void {test_name_positive}() {{
         // Arrange
-{self._generate_test_data(method.params, valid=True)}
+{test_data_code}
 
         // Act
         ApiResponse response = {self._camel_case(service_name)}.{method.name}({params_str});
@@ -1207,15 +1265,18 @@ public class {service_name} {{
             priority += 1
 
             # Generate negative test
-            test_name_negative = f"test{method.name.capitalize()}WithInvalidData"
+            test_name_negative = f"test{base_test_name}WithInvalidData"
             params_invalid = self._generate_test_params(method.params, valid=False)
             params_str_invalid = ', '.join(params_invalid)
+
+            # Generate test data (get only the code, not the imports)
+            test_data_code_invalid, _ = self._generate_test_data(method.params, valid=False)
 
             test_negative = f"""
     @Test(priority = {priority})
     public void {test_name_negative}() {{
         // Arrange
-{self._generate_test_data(method.params, valid=False)}
+{test_data_code_invalid}
 
         // Act
         ApiResponse response = {self._camel_case(service_name)}.{method.name}({params_str_invalid});
@@ -1260,6 +1321,20 @@ public class {test_name} extends BaseTest {{
 
         return content
 
+    def _extract_path_suffix(self, path: str) -> str:
+        """Extract suffix from path to make method names unique"""
+        # Remove leading/trailing slashes and parameters
+        clean_path = re.sub(r'\{[^}]+\}', '', path).strip('/')
+        parts = clean_path.split('/')
+
+        # Use last meaningful part of path
+        if len(parts) > 1:
+            suffix = parts[-1].capitalize()
+            if suffix:
+                return f"By{suffix}"
+
+        return ""
+
     def _camel_case(self, text: str) -> str:
         """Convert to camelCase"""
         if not text:
@@ -1298,6 +1373,11 @@ public class {test_name} extends BaseTest {{
             'array': 'List<Object>',
             'object': 'Object'
         }
+
+        # Handle array types with items
+        if swagger_type == 'array':
+            return 'List<Object>'
+
         return type_mapping.get(swagger_type, 'String')
 
     def _generate_test_params(self, params: List[Tuple[str, str]], valid: bool) -> List[str]:
@@ -1310,17 +1390,63 @@ public class {test_name} extends BaseTest {{
                 param_names.append(param_name)
         return param_names
 
-    def _generate_test_data(self, params: List[Tuple[str, str]], valid: bool) -> str:
-        """Generate test data setup code"""
+    def _generate_param_suffix(self, params: List[Tuple[str, str]]) -> str:
+        """Generate suffix based on parameters to make method names unique"""
+        if not params:
+            return "NoParams"
+
+        # Use parameter names to create suffix
+        param_names = []
+        for param_name, param_type in params:
+            if param_name != 'body':  # Skip generic body parameter
+                # Capitalize first letter of each parameter
+                param_names.append(param_name.capitalize())
+
+        if param_names:
+            return "With" + "And".join(param_names[:2])  # Use first 2 params max
+        else:
+            return "WithBody"
+
+    def _generate_test_data(self, params: List[Tuple[str, str]], valid: bool) -> Tuple[str, Set[str]]:
+        """Generate test data setup code and return required imports"""
         data_lines = []
+        required_imports = set()
 
         for param_name, param_type in params:
             if param_name == 'body':
-                if valid:
-                    data_lines.append(
-                        '        String requestBody = "{\\"name\\": \\"Test\\", \\"status\\": \\"active\\"}";')
+                if 'List' in param_type:
+                    # Generate List data
+                    required_imports.add("java.util.List")
+                    required_imports.add("java.util.ArrayList")
+                    required_imports.add("java.util.Map")
+                    required_imports.add("java.util.HashMap")
+
+                    if valid:
+                        data_lines.append('        List<Object> requestBody = new ArrayList<>();')
+                        data_lines.append('        Map<String, Object> item = new HashMap<>();')
+                        data_lines.append('        item.put("name", "Test");')
+                        data_lines.append('        item.put("status", "active");')
+                        data_lines.append('        requestBody.add(item);')
+                    else:
+                        data_lines.append('        List<Object> requestBody = new ArrayList<>(); // Empty list')
+                elif 'Map' in param_type:
+                    # Generate Map data
+                    required_imports.add("java.util.Map")
+                    required_imports.add("java.util.HashMap")
+
+                    if valid:
+                        data_lines.append('        Map<String, Object> requestBody = new HashMap<>();')
+                        data_lines.append('        requestBody.put("name", "Test");')
+                        data_lines.append('        requestBody.put("status", "active");')
+                    else:
+                        data_lines.append('        Map<String, Object> requestBody = new HashMap<>(); // Empty map')
                 else:
-                    data_lines.append('        String requestBody = "{}"; // Invalid empty body')
+                    # Default Object/String body
+                    if valid:
+                        data_lines.append(
+                            '        String requestBody = "{\\"name\\": \\"Test\\", \\"status\\": \\"active\\"}";')
+                    else:
+                        data_lines.append('        String requestBody = "{}"; // Invalid empty body')
             elif param_type == 'String':
                 if valid:
                     data_lines.append(f'        String {param_name} = "test-{param_name}";')
@@ -1333,10 +1459,21 @@ public class {test_name} extends BaseTest {{
                     data_lines.append(f'        Integer {param_name} = -1; // Invalid negative number')
             elif param_type == 'Boolean':
                 data_lines.append(f'        Boolean {param_name} = {str(valid).lower()};')
+            elif 'List' in param_type:
+                # Non-body list parameter
+                required_imports.add("java.util.List")
+                required_imports.add("java.util.ArrayList")
+
+                element_type = param_type.replace('List<', '').replace('>', '')
+                if valid:
+                    data_lines.append(f'        List<{element_type}> {param_name} = new ArrayList<>();')
+                    data_lines.append(f'        {param_name}.add("test-item");')
+                else:
+                    data_lines.append(f'        List<{element_type}> {param_name} = new ArrayList<>(); // Empty list')
             else:
                 data_lines.append(f'        {param_type} {param_name} = null; // TODO: Set appropriate value')
 
-        return '\n'.join(data_lines)
+        return '\n'.join(data_lines), required_imports
 
 
 class APIAgent:
