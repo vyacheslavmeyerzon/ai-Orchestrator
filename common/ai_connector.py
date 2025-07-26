@@ -42,7 +42,7 @@ class AnthropicConnector(AIConnector):
             raise ValueError("Anthropic API key is required")
 
         self.client = anthropic.Anthropic(api_key=self.api_key)
-        self.model = "claude-sonnet-4-20250514" ####### claude-opus-4-20250514 - 15$ ##claude-sonnet-4-20250514 - 3$
+        self.model = "claude-opus-4-20250514"  ####### claude-opus-4-20250514 - 15$ ##claude-sonnet-4-20250514 - 3$
 
     async def generate_response(self, prompt: str, system_message: str = None) -> str:
         """Generate response using Claude"""
@@ -69,20 +69,53 @@ class AnthropicConnector(AIConnector):
         """Generate structured response with JSON parsing"""
         response_text = await self.generate_response(prompt, system_message)
 
-        # Try to extract JSON from response
+        # First check if response uses file marker format
+        if "===FILE:" in response_text:
+            docker_files = {}
+
+            import re
+            # Extract files using the marker format
+            sections = re.split(r'===FILE:\s*', response_text)[1:]  # Skip first empty element
+
+            for section in sections:
+                if '===' in section:
+                    parts = section.split('===', 1)
+                    if len(parts) >= 2:
+                        filename = parts[0].strip()
+                        # Get content between first === and ===END FILE=== or next ===FILE:
+                        content_parts = parts[1].split('===END FILE===', 1)
+                        content = content_parts[0].strip()
+
+                        docker_files[filename] = content
+
+            if docker_files:
+                return {"docker_files": docker_files}
+
+        # If no markers found or extraction failed, try JSON parsing
         try:
             import json
+
             # Find JSON block in response
             start_idx = response_text.find('{')
             end_idx = response_text.rfind('}') + 1
 
             if start_idx != -1 and end_idx != -1:
                 json_str = response_text[start_idx:end_idx]
-                return json.loads(json_str)
+
+                # Try to parse JSON
+                try:
+                    result = json.loads(json_str)
+                    return result
+
+                except json.JSONDecodeError as e:
+                    # Return raw response
+                    return {"response": response_text}
             else:
                 return {"response": response_text}
 
-        except json.JSONDecodeError:
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return {"response": response_text}
 
 

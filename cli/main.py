@@ -47,7 +47,7 @@ Automated test generation and management system
         box=box.DOUBLE_EDGE,
         style="bold blue",
         title="[bold cyan]Welcome[/bold cyan]",
-        subtitle="[italic]v0.3.0-Security Enhanced[/italic]"
+        subtitle="[italic]v0.1.0[/italic]"
     ))
 
 
@@ -166,6 +166,28 @@ def create_projects_table(projects: list) -> Table:
         )
 
     return table
+
+
+def validate_project_type(value: str) -> str:
+    """Validate project type with future release message"""
+    if value in ['ui', 'full']:
+        print_error("This functionality will be available in future releases")
+        sys.exit(1)
+    elif value not in ['api']:
+        print_error(f"Invalid project type: {value}. Only 'api' is currently supported.")
+        sys.exit(1)
+    return value
+
+
+def validate_language(value: str) -> str:
+    """Validate language with future release message"""
+    if value == 'python':
+        print_error("This functionality will be available in future releases")
+        sys.exit(1)
+    elif value not in ['java']:
+        print_error(f"Invalid language: {value}. Only 'java' is currently supported.")
+        sys.exit(1)
+    return value
 
 
 @click.group(invoke_without_command=True)
@@ -295,10 +317,10 @@ def project(ctx):
 @project.command()
 @click.option('--name', help='Name of the new project')
 @click.option('--type', 'project_type',
-              type=click.Choice(['api', 'ui', 'full']),
+              type=click.Choice(['api']),  # Only 'api' is available now
               help='Type of project to create')
 @click.option('--language',
-              type=click.Choice(['java', 'python']),
+              type=click.Choice(['java']),  # Only 'java' is available now
               help='Programming language')
 @click.option('--output-dir', help='Full path where project should be created')
 @click.option('--api-spec-file', 'api_spec_file',
@@ -331,21 +353,46 @@ def create(ctx, name, project_type, language, output_dir, api_spec_file, base_ur
         name = Prompt.ask("🏷️  [bold]Project name[/bold]")
 
     if not project_type:
-        project_type = Prompt.ask(
-            "🎯 [bold]Project type[/bold]",
-            choices=['api', 'ui', 'full'],
-            default='api'
-        )
+        # Custom prompt validation for project type
+        while True:
+            project_type = Prompt.ask(
+                "🎯 [bold]Project type[/bold]",
+                default='api'
+            )
+            if project_type in ['ui', 'full']:
+                print_error("This functionality will be available in future releases")
+                continue
+            elif project_type == 'api':
+                break
+            else:
+                print_error(f"Invalid choice: {project_type}. Please enter 'api'.")
+                continue
 
     if not language:
-        language = Prompt.ask(
-            "💻 [bold]Programming language[/bold]",
-            choices=['java', 'python'],
-            default='java'
-        )
+        # Custom prompt validation for language
+        while True:
+            language = Prompt.ask(
+                "💻 [bold]Programming language[/bold]",
+                default='java'
+            )
+            if language == 'python':
+                print_error("This functionality will be available in future releases")
+                continue
+            elif language == 'java':
+                break
+            else:
+                print_error(f"Invalid choice: {language}. Please enter 'java'.")
+                continue
+
+    # Validate command line arguments if provided
+    if project_type:
+        project_type = validate_project_type(project_type)
+
+    if language:
+        language = validate_language(language)
 
     # Ask for API specification file if not provided and project type is API
-    if not api_spec_file and project_type in ['api', 'full']:
+    if not api_spec_file and project_type in ['api']:
         has_spec = Confirm.ask("📄 [bold]Do you have an API specification file (Swagger/Postman/YAML)?[/bold]")
         if has_spec:
             api_spec_file = Prompt.ask("📂 [bold]Path to API specification file[/bold]")
@@ -717,19 +764,19 @@ def version(ctx):
 
     # Version panel
     version_info = Panel(
-        """🤖 [bold]AI Test Orchestrator[/bold] v0.3.0-Security Enhanced
+        """🤖 [bold]AI Test Orchestrator[/bold] v0.1.0 Initial
 
 [bold cyan]Components:[/bold cyan]
 • Agent Orchestrator ✅
-• API Agent (Enhanced) ✅
+• API Agent (Enhanced with Code Validation) ✅
 • DevOps Agent (Production Ready) ✅
 • Parser Agent (Security Enhanced) 🚀
-• UI Agent (Planned) ⏳
-• Database Agent (Planned) ⏳
+• UI Agent (Coming soon) ⏳
+• Database Agent (Coming soon) ⏳
 
-[bold yellow]Features:[/bold yellow]
+[bold yellow]Current Features:[/bold yellow]
 • AI-powered project analysis
-• Intelligent agent coordination
+• API test automation (Java/RestAssured)
 • Real project file generation
 • Persistent project storage
 • Beautiful CLI interface
@@ -738,6 +785,13 @@ def version(ctx):
 • Security hardcoded secrets detection 🆕
 • Multi-environment configuration 🆕
 • Authentication setup automation 🆕
+• Code validation and auto-fixing 🆕
+
+[bold blue]Coming Soon:[/bold blue]
+• UI test automation support
+• Python language support
+• Database testing capabilities
+• Advanced reporting system
 
 [dim]Built with Python, Claude AI, and modern CLI tools[/dim]""",
         title="[bold]Version Information[/bold]",

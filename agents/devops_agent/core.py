@@ -468,23 +468,16 @@ class DevOpsAgent:
 
             Make everything production-ready and optimized for {host_analysis['os']}.
 
-            Respond with JSON:
-            {{
-                "docker_files": {{
-                    "Dockerfile": "content",
-                    "docker-compose.yml": "content",
-                    "docker-compose.debug.yml": "content",
-                    "docker-compose.allure.yml": "content",
-                    "docker-entrypoint.sh": "content",
-                    ".dockerignore": "content",
-                    ".github/workflows/test.yml": "content",
-                    ".github/workflows/docker-build.yml": "content",
-                    ".hadolint.yml": "content",
-                    "security/docker-security-scan.sh": "content",
-                    "DOCKER_QUICKSTART.md": "content",
-                    "DEVOPS_GUIDE.md": "content"
-                }}
-            }}
+            Respond with a simple list format:
+===FILE: Dockerfile===
+[content here]
+===END FILE===
+
+===FILE: docker-compose.yml===
+[content here]  
+===END FILE===
+
+And so on for all files.
             """
 
             response = await self.ai_connector.generate_structured_response(
