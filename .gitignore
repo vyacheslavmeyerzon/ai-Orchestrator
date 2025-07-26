@@ -4,17 +4,35 @@ __pycache__/
 *.pyo
 *.egg-info/
 venv/
+.venv/
+env/
+
+# Environment variables - CRITICAL!
 .env
+.env.*
+!.env.template
+!.env.example
 
 # Data
 data/
 *.db
 *.sqlite
+*.db-journal
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Logs
 *.log
 logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+output/
+test-projects/
