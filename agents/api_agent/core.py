@@ -1,5 +1,5 @@
 """
-API Agent - Fixed Version with Consistent Code Generation
+API Agent - Enhanced Version with Auth Support and Correct Parameter Handling
 Ensures compatibility between services, tests, and framework components
 """
 
@@ -44,6 +44,9 @@ class MethodSignature:
     description: str = ""
     http_method: str = ""
     endpoint: str = ""
+    requires_auth: bool = False  # NEW: Track if endpoint requires authentication
+    path_params: List[str] = field(default_factory=list)  # NEW: Track which params are path params
+    query_params: List[str] = field(default_factory=list)  # NEW: Track which params are query params
 
 
 @dataclass
@@ -152,6 +155,7 @@ class TemplateGenerator:
         <allure.version>2.24.0</allure.version>
         <commons.lang3.version>3.13.0</commons.lang3.version>
         <jsonpath.version>2.8.0</jsonpath.version>
+        <javafaker.version>1.0.2</javafaker.version>
 
         <!-- Plugin Versions -->
         <maven.compiler.version>3.11.0</maven.compiler.version>
@@ -185,6 +189,13 @@ class TemplateGenerator:
             <groupId>com.jayway.jsonpath</groupId>
             <artifactId>json-path</artifactId>
             <version>${{jsonpath.version}}</version>
+        </dependency>
+
+        <!-- JavaFaker for test data -->
+        <dependency>
+            <groupId>com.github.javafaker</groupId>
+            <artifactId>javafaker</artifactId>
+            <version>${{javafaker.version}}</version>
         </dependency>
 
         <!-- Logging -->
@@ -364,12 +375,14 @@ public class ApiRequest {{
         }}
 
         public Builder queryParam(String key, String value) {{
-            request.queryParams.put(key, value);
+            if (value != null && !value.isEmpty()) {{
+                request.queryParams.put(key, value);
+            }}
             return this;
         }}
 
         public Builder queryParams(Map<String, String> params) {{
-            request.queryParams.putAll(params);
+            params.forEach((k, v) -> queryParam(k, v));
             return this;
         }}
 
@@ -466,75 +479,36 @@ public class RestAssuredClient {{
         }}
     }}
 
-    // Main methods that accept ApiRequest
-    public ApiResponse get(ApiRequest apiRequest) {{
-        logger.info("Executing GET request to {{}}", apiRequest.getEndpoint());
-        Response response = buildRequest(apiRequest).get(apiRequest.getEndpoint());
-        return new ApiResponse(response);
-    }}
-
-    public ApiResponse post(ApiRequest apiRequest) {{
-        logger.info("Executing POST request to {{}}", apiRequest.getEndpoint());
-        Response response = buildRequest(apiRequest).post(apiRequest.getEndpoint());
-        return new ApiResponse(response);
-    }}
-
-    public ApiResponse put(ApiRequest apiRequest) {{
-        logger.info("Executing PUT request to {{}}", apiRequest.getEndpoint());
-        Response response = buildRequest(apiRequest).put(apiRequest.getEndpoint());
-        return new ApiResponse(response);
-    }}
-
-    public ApiResponse delete(ApiRequest apiRequest) {{
-        logger.info("Executing DELETE request to {{}}", apiRequest.getEndpoint());
-        Response response = buildRequest(apiRequest).delete(apiRequest.getEndpoint());
-        return new ApiResponse(response);
-    }}
-
-    public ApiResponse patch(ApiRequest apiRequest) {{
-        logger.info("Executing PATCH request to {{}}", apiRequest.getEndpoint());
-        Response response = buildRequest(apiRequest).patch(apiRequest.getEndpoint());
-        return new ApiResponse(response);
-    }}
-
     // Generic execute method for any HTTP method
     public ApiResponse execute(ApiRequest apiRequest) {{
         String method = apiRequest.getMethod().toUpperCase();
+        logger.info("Executing {{}} request to {{}}", method, apiRequest.getEndpoint());
+
+        Response response;
+        String endpoint = resolveEndpoint(apiRequest);
+        RequestSpecification spec = buildRequest(apiRequest);
+
         switch (method) {{
             case "GET":
-                return get(apiRequest);
+                response = spec.get(endpoint);
+                break;
             case "POST":
-                return post(apiRequest);
+                response = spec.post(endpoint);
+                break;
             case "PUT":
-                return put(apiRequest);
+                response = spec.put(endpoint);
+                break;
             case "DELETE":
-                return delete(apiRequest);
+                response = spec.delete(endpoint);
+                break;
             case "PATCH":
-                return patch(apiRequest);
+                response = spec.patch(endpoint);
+                break;
             default:
                 throw new IllegalArgumentException("Unsupported HTTP method: " + method);
         }}
-    }}
 
-    // Convenience methods
-    public ApiResponse get(String endpoint) {{
-        return get(ApiRequest.builder().get().endpoint(endpoint).build());
-    }}
-
-    public ApiResponse post(String endpoint, Object body) {{
-        return post(ApiRequest.builder().post().endpoint(endpoint).body(body).build());
-    }}
-
-    public ApiResponse put(String endpoint, Object body) {{
-        return put(ApiRequest.builder().put().endpoint(endpoint).body(body).build());
-    }}
-
-    public ApiResponse delete(String endpoint) {{
-        return delete(ApiRequest.builder().delete().endpoint(endpoint).build());
-    }}
-
-    public ApiResponse patch(String endpoint, Object body) {{
-        return patch(ApiRequest.builder().patch().endpoint(endpoint).body(body).build());
+        return new ApiResponse(response);
     }}
 
     // Build request with all parameters
@@ -587,6 +561,18 @@ public class RestAssuredClient {{
         }}
 
         return spec;
+    }}
+
+    // Resolve endpoint with path parameters
+    private String resolveEndpoint(ApiRequest apiRequest) {{
+        String endpoint = apiRequest.getEndpoint();
+
+        // Replace path parameters in the endpoint
+        for (Map.Entry<String, String> entry : apiRequest.getPathParams().entrySet()) {{
+            endpoint = endpoint.replace("{{" + entry.getKey() + "}}", entry.getValue());
+        }}
+
+        return endpoint;
     }}
 }}"""
 
@@ -1031,6 +1017,10 @@ class ServiceTestGenerator:
             summary = endpoint.get('summary', '')
             parameters = endpoint.get('parameters', [])
             request_body = endpoint.get('requestBody', {})
+            security = endpoint.get('security', [])  # NEW: Check security requirements
+
+            # Determine if endpoint requires authentication
+            requires_auth = bool(security)
 
             # Determine service name from tags or path
             tags = endpoint.get('tags', [])
@@ -1050,29 +1040,40 @@ class ServiceTestGenerator:
                 path_suffix = self._extract_path_suffix(path)
                 method_name = f"{method_name}{path_suffix}"
 
-            # Parse parameters
+            # Parse parameters and track their types
             params = []
+            path_params = []
+            query_params = []
             param_names = set()  # Track parameter names to avoid duplicates
 
             for param in parameters:
                 param_name = self._camel_case(param.get('name', ''))
+                param_in = param.get('in', 'query')  # NEW: Check parameter location
+
                 if param_name and param_name not in param_names:
-                    param_type = self._get_java_type(param.get('type', 'string'))
+                    param_type = self._get_java_type(param.get('type', param.get('schema', {}).get('type', 'string')))
                     params.append((param_name, param_type))
                     param_names.add(param_name)
+
+                    # Track parameter location
+                    if param_in == 'path':
+                        path_params.append(param_name)
+                    elif param_in == 'query':
+                        query_params.append(param_name)
 
             # Add body parameter for POST/PUT/PATCH only if not already present
             if method in ['POST', 'PUT', 'PATCH'] and request_body and 'body' not in param_names:
                 # Determine body type from request body schema
-                body_type = 'Object'
+                body_type = 'String'  # Default to String for JSON body
                 if 'content' in request_body:
                     for content_type, content_spec in request_body['content'].items():
                         if 'schema' in content_spec:
                             schema = content_spec['schema']
                             if schema.get('type') == 'array':
                                 body_type = 'List<Object>'
-                            elif schema.get('type') == 'object':
-                                body_type = 'Object'
+                            elif '$ref' in schema:
+                                # Reference to a model
+                                body_type = 'String'  # We'll pass JSON string
 
                 params.append(('body', body_type))
 
@@ -1083,7 +1084,10 @@ class ServiceTestGenerator:
                 return_type='ApiResponse',
                 description=summary,
                 http_method=method,
-                endpoint=path
+                endpoint=path,
+                requires_auth=requires_auth,  # NEW: Store auth requirement
+                path_params=path_params,  # NEW: Store path parameter names
+                query_params=query_params  # NEW: Store query parameter names
             )
 
             service_methods[service_name].append(method_sig)
@@ -1112,43 +1116,16 @@ class ServiceTestGenerator:
 
         # Generate methods
         method_implementations = []
+
         for method in methods:
-            params_str = ', '.join([f"{ptype} {pname}" for pname, ptype in method.params])
+            # Generate base method
+            base_method = self._generate_service_method(method, False)
+            method_implementations.append(base_method)
 
-            # Build request
-            request_builder = ["        ApiRequest request = ApiRequest.builder()"]
-            request_builder.append(f"            .{method.http_method.lower()}()")
-            request_builder.append(f"            .endpoint(\"{method.endpoint}\")")
-
-            # Add parameters to request
-            for param_name, param_type in method.params:
-                if param_name == 'body':
-                    request_builder.append(f"            .body({param_name})")
-                elif 'path' in method.endpoint and '{' in method.endpoint:
-                    # Check if this parameter is actually in the path
-                    if f"{{{param_name}}}" in method.endpoint:
-                        request_builder.append(
-                            f"            .pathParam(\"{param_name}\", String.valueOf({param_name}))")
-                    else:
-                        # It's a query parameter
-                        request_builder.append(
-                            f"            .queryParam(\"{param_name}\", String.valueOf({param_name}))")
-                else:
-                    # Query parameter
-                    request_builder.append(f"            .queryParam(\"{param_name}\", String.valueOf({param_name}))")
-
-            request_builder.append("            .build();")
-
-            method_impl = f"""
-    /**
-     * {method.description}
-     */
-    public ApiResponse {method.name}({params_str}) {{
-{chr(10).join(request_builder)}
-
-        return client.execute(request);
-    }}"""
-            method_implementations.append(method_impl)
+            # Generate auth variant if endpoint requires authentication
+            if method.requires_auth:
+                auth_method = self._generate_service_method(method, True)
+                method_implementations.append(auth_method)
 
         # Generate class
         content = f"""package {package};
@@ -1179,6 +1156,59 @@ public class {service_name} {{
         self.registry.register_class(java_class)
 
         return content
+
+    def _generate_service_method(self, method: MethodSignature, with_auth: bool) -> str:
+        """Generate a service method implementation"""
+        # Prepare method name and parameters
+        method_name = method.name
+        params = list(method.params)
+
+        if with_auth:
+            method_name = f"{method_name}WithAuth"
+            params.append(('token', 'String'))
+
+        params_str = ', '.join([f"{ptype} {pname}" for pname, ptype in params])
+
+        # Build the endpoint with path parameters replaced
+        endpoint = method.endpoint
+        for path_param in method.path_params:
+            endpoint = endpoint.replace(f"{{{path_param}}}", f"\" + {path_param} + \"")
+
+        # Build request
+        request_builder = ["        ApiRequest request = ApiRequest.builder()"]
+        request_builder.append(f"            .{method.http_method.lower()}()")
+        request_builder.append(f"            .endpoint(\"{endpoint}\")")
+
+        # Add query parameters
+        for param_name, param_type in method.params:
+            if param_name in method.query_params:
+                request_builder.append(f"            .queryParam(\"{param_name}\", String.valueOf({param_name}))")
+            elif param_name == 'body':
+                request_builder.append(f"            .body({param_name})")
+
+        # Add authentication if this is the auth variant
+        if with_auth:
+            request_builder.append(f"            .auth(\"bearer\", token)")
+
+        request_builder.append("            .build();")
+
+        # Generate method documentation
+        doc_lines = [f"    /**"]
+        doc_lines.append(f"     * {method.description}")
+        if with_auth:
+            doc_lines.append(f"     * @param token Authentication token")
+        doc_lines.append(f"     * @return ApiResponse")
+        doc_lines.append(f"     */")
+
+        method_impl = f"""
+{chr(10).join(doc_lines)}
+    public ApiResponse {method_name}({params_str}) {{
+{chr(10).join(request_builder)}
+
+        return client.execute(request);
+    }}"""
+
+        return method_impl
 
     def generate_test(self, service_name: str) -> str:
         """Generate test class for a service"""
@@ -1237,56 +1267,37 @@ public class {service_name} {{
 
             # Generate positive test
             test_name_positive = f"test{base_test_name}Success"
-            params = self._generate_test_params(method.params, valid=True)
-            params_str = ', '.join(params)
-
-            # Generate positive test
-            test_name_positive = f"test{base_test_name}Success"
-            params = self._generate_test_params(method.params, valid=True)
-            params_str = ', '.join(params)
-
-            # Generate test data (get only the code, not the imports)
-            test_data_code, _ = self._generate_test_data(method.params, valid=True)
-
-            test_positive = f"""
-    @Test(priority = {priority})
-    public void {test_name_positive}() {{
-        // Arrange
-{test_data_code}
-
-        // Act
-        ApiResponse response = {self._camel_case(service_name)}.{method.name}({params_str});
-
-        // Assert
-        assertThat(response.getStatusCode()).isEqualTo(200);
-        assertThat(response.isSuccessful()).isTrue();
-    }}"""
+            test_positive = self._generate_test_method(
+                method, service_name, test_name_positive, priority, True, False
+            )
             test_methods.append(test_positive)
             priority += 1
 
             # Generate negative test
             test_name_negative = f"test{base_test_name}WithInvalidData"
-            params_invalid = self._generate_test_params(method.params, valid=False)
-            params_str_invalid = ', '.join(params_invalid)
-
-            # Generate test data (get only the code, not the imports)
-            test_data_code_invalid, _ = self._generate_test_data(method.params, valid=False)
-
-            test_negative = f"""
-    @Test(priority = {priority})
-    public void {test_name_negative}() {{
-        // Arrange
-{test_data_code_invalid}
-
-        // Act
-        ApiResponse response = {self._camel_case(service_name)}.{method.name}({params_str_invalid});
-
-        // Assert
-        assertThat(response.getStatusCode()).isGreaterThanOrEqualTo(400);
-        assertThat(response.isSuccessful()).isFalse();
-    }}"""
+            test_negative = self._generate_test_method(
+                method, service_name, test_name_negative, priority, False, False
+            )
             test_methods.append(test_negative)
             priority += 1
+
+            # If method requires auth, generate auth tests
+            if method.requires_auth:
+                # Test with valid token
+                test_name_auth = f"test{base_test_name}WithValidAuth"
+                test_auth = self._generate_test_method(
+                    method, service_name, test_name_auth, priority, True, True
+                )
+                test_methods.append(test_auth)
+                priority += 1
+
+                # Test without token (401 expected)
+                test_name_unauth = f"test{base_test_name}WithoutAuth"
+                test_unauth = self._generate_unauthorized_test(
+                    method, service_name, test_name_unauth, priority
+                )
+                test_methods.append(test_unauth)
+                priority += 1
 
         # Generate class
         content = f"""package {package};
@@ -1299,6 +1310,7 @@ public class {service_name} {{
 public class {test_name} extends BaseTest {{
 
     private {service_name} {self._camel_case(service_name)};
+    private String validAuthToken = "test-auth-token-123"; // TODO: Get from auth service
 
     @BeforeClass
     public void setUp() {{
@@ -1320,6 +1332,69 @@ public class {test_name} extends BaseTest {{
         self.registry.register_class(java_class)
 
         return content
+
+    def _generate_test_method(self, method: MethodSignature, service_name: str,
+                              test_name: str, priority: int, valid: bool, with_auth: bool) -> str:
+        """Generate a test method"""
+        # Generate test data
+        test_data_code, _ = self._generate_test_data(method.params, valid)
+
+        # Build method call parameters
+        params = self._generate_test_params(method.params, valid)
+        if with_auth and method.requires_auth:
+            params.append('validAuthToken')
+        params_str = ', '.join(params)
+
+        # Determine expected status code
+        if not valid:
+            expected_status = "assertThat(response.getStatusCode()).isGreaterThanOrEqualTo(400);"
+            success_check = "assertThat(response.isSuccessful()).isFalse();"
+        else:
+            expected_status = "assertThat(response.getStatusCode()).isIn(200, 201, 204);"
+            success_check = "assertThat(response.isSuccessful()).isTrue();"
+
+        # Determine which method to call
+        method_to_call = method.name
+        if with_auth and method.requires_auth:
+            method_to_call = f"{method.name}WithAuth"
+
+        return f"""
+    @Test(priority = {priority})
+    public void {test_name}() {{
+        // Arrange
+{test_data_code}
+
+        // Act
+        ApiResponse response = {self._camel_case(service_name)}.{method_to_call}({params_str});
+
+        // Assert
+        {expected_status}
+        {success_check}
+    }}"""
+
+    def _generate_unauthorized_test(self, method: MethodSignature, service_name: str,
+                                    test_name: str, priority: int) -> str:
+        """Generate a test for unauthorized access"""
+        # Generate valid test data
+        test_data_code, _ = self._generate_test_data(method.params, True)
+
+        # Build method call parameters (without auth token)
+        params = self._generate_test_params(method.params, True)
+        params_str = ', '.join(params)
+
+        return f"""
+    @Test(priority = {priority})
+    public void {test_name}() {{
+        // Arrange
+{test_data_code}
+
+        // Act - Call without authentication
+        ApiResponse response = {self._camel_case(service_name)}.{method.name}({params_str});
+
+        // Assert - Should return 401 Unauthorized
+        assertThat(response.getStatusCode()).isEqualTo(401);
+        assertThat(response.isSuccessful()).isFalse();
+    }}"""
 
     def _extract_path_suffix(self, path: str) -> str:
         """Extract suffix from path to make method names unique"""
@@ -1424,7 +1499,7 @@ public class {test_name} extends BaseTest {{
                     if valid:
                         data_lines.append('        List<Object> requestBody = new ArrayList<>();')
                         data_lines.append('        Map<String, Object> item = new HashMap<>();')
-                        data_lines.append('        item.put("name", "Test");')
+                        data_lines.append('        item.put("name", "Test Item");')
                         data_lines.append('        item.put("status", "active");')
                         data_lines.append('        requestBody.add(item);')
                     else:
@@ -1477,13 +1552,13 @@ public class {test_name} extends BaseTest {{
 
 
 class APIAgent:
-    """Fixed API Agent with consistent code generation"""
+    """Enhanced API Agent with auth support and correct parameter handling"""
 
     def __init__(self):
         self.config = get_config()
         self.logger = get_agent_logger("api_agent")
         self.ai_connector = AIConnectorFactory.create_connector()
-        self.logger.info("Fixed API Agent initialized")
+        self.logger.info("Enhanced API Agent initialized")
 
     def _normalize_project_name(self, project_name: str) -> str:
         """Normalize project name for Java package naming"""
@@ -1495,6 +1570,25 @@ class APIAgent:
         normalized_name = self._normalize_project_name(project_name)
         return f"com.{normalized_name}"
 
+    async def execute_operation(self, operation: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute operation - main entry point from orchestrator"""
+        self.logger.info(f"Executing operation: {operation}")
+
+        if operation in ["create_project_structure", "setup_test_framework"]:
+            return await self.create_project_structure(params)
+        elif operation == "generate_test_classes":
+            # For compatibility - just create project structure
+            return await self.create_project_structure(params)
+        elif operation == "create_test_utilities":
+            # For compatibility - just create project structure
+            return await self.create_project_structure(params)
+        else:
+            return {
+                "operation": operation,
+                "status": "completed",
+                "message": f"Operation {operation} completed"
+            }
+
     async def create_project_structure(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Create professional RestAssured framework structure"""
         project_name = params['project_name']
@@ -1502,7 +1596,7 @@ class APIAgent:
         output_path = Path(params['output_path'])
         parsed_data = params.get('parsed_data')
 
-        self.logger.info(f"Creating fixed RestAssured framework: {project_name}")
+        self.logger.info(f"Creating enhanced RestAssured framework: {project_name}")
 
         if language != "java":
             raise ValueError("This framework generator only supports Java projects")
@@ -1590,10 +1684,10 @@ class APIAgent:
                 "operation": "create_project_structure",
                 "status": "completed",
                 "language": "java",
-                "framework": "Fixed RestAssured + TestNG",
+                "framework": "Enhanced RestAssured + TestNG",
                 "created_files": created_files,
                 "base_package": base_package,
-                "message": f"Created fixed Java RestAssured framework with {len(created_files)} files"
+                "message": f"Created enhanced Java RestAssured framework with {len(created_files)} files"
             }
 
         except Exception as e:
@@ -1796,7 +1890,22 @@ logging.enabled=true
         files["src/test/resources/testng.xml"] = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd">
 <suite name="API Test Suite" parallel="methods" thread-count="5">
+    <listeners>
+        <listener class-name="io.qameta.allure.testng.AllureTestNg"/>
+    </listeners>
+
     <test name="API Tests">
+        <packages>
+            <package name="{base_package}.tests.*"/>
+        </packages>
+    </test>
+
+    <test name="Smoke Tests">
+        <groups>
+            <run>
+                <include name="smoke"/>
+            </run>
+        </groups>
         <packages>
             <package name="{base_package}.tests.*"/>
         </packages>
@@ -1812,23 +1921,21 @@ logging.enabled=true
         </encoder>
     </appender>
 
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>target/test-logs/api-tests.log</file>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
     <root level="INFO">
         <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
     </root>
 </configuration>"""
 
         return files
 
-    # Support methods for backwards compatibility
-    async def execute_operation(self, operation: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute operation - main entry point from orchestrator"""
-        self.logger.info(f"Executing operation: {operation}")
 
-        if operation in ["create_project_structure", "setup_test_framework"]:
-            return await self.create_project_structure(params)
-        else:
-            return {
-                "operation": operation,
-                "status": "completed",
-                "message": f"Operation {operation} completed"
-            }
+
+
