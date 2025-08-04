@@ -1,3 +1,4 @@
+# common/config.py
 """
 Configuration management for AI Test Orchestrator
 """

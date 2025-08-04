@@ -1,6 +1,7 @@
+# cli/main.py
 """
-Beautiful CLI interface for AI Test Orchestrator with Rich formatting
-Enhanced with base URL and security parameter support
+CLI interface for AI Test Orchestrator with Rich formatting
+with base URL and security parameter support
 """
 
 import click

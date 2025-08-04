@@ -1,3 +1,4 @@
+# common/ai_connector.py
 """
 AI Connector module for handling different AI providers (Claude, GPT)
 """

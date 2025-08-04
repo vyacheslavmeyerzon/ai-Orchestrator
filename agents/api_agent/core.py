@@ -1,5 +1,6 @@
+# agents/api_agent/core.py
 """
-API Agent - Enhanced Version with Auth Support and Correct Parameter Handling
+API Agent - Version with Auth Support and Correct Parameter Handling
 Ensures compatibility between services, tests, and framework components
 """
 

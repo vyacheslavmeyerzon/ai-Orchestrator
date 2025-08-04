@@ -1,8 +1,8 @@
+# agents/devops_agent/core.py
 """
-DevOps Agent - Enhanced version with comprehensive infrastructure support
+DevOps Agent - version with comprehensive infrastructure support
 Includes Docker, CI/CD, Kubernetes, Monitoring, and Security features
 """
-
 import os
 import json
 import platform

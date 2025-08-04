@@ -1,3 +1,4 @@
+# agents/parser_agent/core.py
 """
 Parser Agent - Specialized agent for parsing API specifications and generating comprehensive tests
 """
